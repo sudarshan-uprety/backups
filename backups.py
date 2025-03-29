@@ -8,10 +8,9 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 class BackupManager:
-    def __init__(self, google_drive_folder_id):
+    def __init__(self):
         logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
         self.logger = logging.getLogger(__name__)
-        self.google_drive_folder_id = google_drive_folder_id
 
     def create_gitlab_backup(self):
         """
@@ -110,8 +109,6 @@ class BackupManager:
             )
             drive_service = build("drive", "v3", credentials=credentials)
 
-            self.delete_old_drive_backups(drive_service)
-
             file_metadata = {
                 "name": os.path.basename(file_path),
                 "parents": [google_drive_folder_id]
@@ -121,19 +118,19 @@ class BackupManager:
             file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
 
             self.logger.info(f"File uploaded successfully. File ID: {file.get('id')}")
-            self.delete_old_drive_backups(drive_service=drive_service)
-            
+            self.delete_old_drive_backups(drive_service=drive_service, google_drive_folder_id=google_drive_folder_id)
+
         except Exception as e:
             self.logger.error(f"Google Drive upload failed: {e}")
             raise
 
-    def delete_old_drive_backups(self, drive_service):
+    def delete_old_drive_backups(self, drive_service, google_drive_folder_id):
         """
         Deletes all old backups from Google Drive, keeping only the latest one.
         """
         try:
-            query = f"'{self.google_drive_folder_id}' in parents and trashed=false"
-            results = drive_service.files().list(q=query, fields="files(id, name, createdTime)", pageSize=1000).execute()
+            query = f"'{google_drive_folder_id}' in parents and trashed=false"
+            results = drive_service.files().list(q=query, fields="files(id, name, createdTime)").execute()
             files = results.get("files", [])
 
             if not files:
