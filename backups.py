@@ -40,7 +40,7 @@ class BackupManager:
                 except PermissionError:
                     self.logger.warning(f"Permission denied when removing: {backup}")
 
-            return backups[0] # returning the latest backup
+            self.upload_to_google_drive(file_path=backups[0], google_drive_folder_id='1SNuXyvSqpff3_U2uzDM9ZfVicwMfr8eV')
 
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Backup creation failed: {e}")
@@ -86,12 +86,12 @@ class BackupManager:
                 except PermissionError:
                     self.logger.warning(f"Permission denied when removing: {old_backup}")
 
-            return backup_file
+            self.upload_to_google_drive(file_path=backup_file, google_drive_folder_id='1roM3QbZJs2Ck2eQr3t7Zh5zSWd3Wfs5d')
         except subprocess.CalledProcessError as e:
             self.logger.error(f"{backup_name.capitalize()} backup failed: {e}")
             raise
 
-    def upload_to_google_drive(self, file_path):
+    def upload_to_google_drive(self, file_path, google_drive_folder_id):
         """
         Uploads a backup file to Google Drive.
 
@@ -114,14 +114,15 @@ class BackupManager:
 
             file_metadata = {
                 "name": os.path.basename(file_path),
-                "parents": [self.google_drive_folder_id]
+                "parents": [google_drive_folder_id]
             }
 
             media = MediaFileUpload(file_path, resumable=True)
             file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
 
             self.logger.info(f"File uploaded successfully. File ID: {file.get('id')}")
-            return file.get("id")
+            self.delete_old_drive_backups(drive_service=drive_service)
+            
         except Exception as e:
             self.logger.error(f"Google Drive upload failed: {e}")
             raise
@@ -202,9 +203,6 @@ class BackupManager:
                 backup_file = self.create_directory_backup(backup_name, directories)
             else:
                 raise ValueError("Invalid backup method. Use 'gitlab' or 'directory'.")
-
-            # Upload backup file to Google Drive
-            self.upload_to_google_drive(backup_file)
 
         except Exception as e:
             self.logger.error(f"{backup_name.capitalize()} backup process failed: {e}")
