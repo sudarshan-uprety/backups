@@ -14,11 +14,11 @@ pipeline {
                         // SSH to create GitLab backup
                         def BACKUP_DIR = '/var/opt/gitlab/backups'
                         sh """
-                            ssh -i "$SSH_KEY_PATH" -p "$SSH_PORT" \\
-                                -o StrictHostKeyChecking=no \\
-                                -o UserKnownHostsFile=/dev/null \\
-                                "$SERVER_USER@$SERVER_HOST" \\
-                                "cd backups && sudo python3 backups.py"
+                            ssh -t -i "$SSH_KEY_PATH" -p "$SSH_PORT" \
+                                -o StrictHostKeyChecking=no \
+                                -o UserKnownHostsFile=/dev/null \
+                                "$SERVER_USER@$SERVER_HOST" \
+                                "cd backups && sudo -n python3 main.py"
                         """
                     }
                 }
