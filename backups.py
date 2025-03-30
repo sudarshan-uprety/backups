@@ -28,18 +28,26 @@ class BackupManager:
                 for f in os.listdir(backup_directory)
                 if f.endswith('_gitlab_backup.tar')
             ]
+            
+            if not backups:
+                raise FileNotFoundError("No GitLab backup files found after backup creation")
+                
             # Sort backups by creation time
             backups.sort(key=os.path.getctime, reverse=True)
+            latest_backup = backups[0]
 
-            # Remove older backups
+            # Remove older backups locally
             for backup in backups[1:]:
                 try:
-                    os.remove(backup)
+                    subprocess.run(['sudo', 'rm', backup], check=True)
                     self.logger.info(f"Removed old backup: {backup}")
-                except PermissionError:
+                except subprocess.CalledProcessError:
                     self.logger.warning(f"Permission denied when removing: {backup}")
 
-            self.upload_to_google_drive(file_path=backups[0], google_drive_folder_id='1SNuXyvSqpff3_U2uzDM9ZfVicwMfr8eV')
+            self.logger.info(f"Latest GitLab backup file: {latest_backup}")
+            self.upload_to_google_drive(file_path=latest_backup, google_drive_folder_id='1SNuXyvSqpff3_U2uzDM9ZfVicwMfr8eV')
+            
+            return latest_backup
 
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Backup creation failed: {e}")
@@ -48,44 +56,65 @@ class BackupManager:
     def create_directory_backup(self, backup_name, directories):
         """
         Creates a `.tar.gz` archive for the given directories.
+        Stores backups in a dedicated subfolder.
 
         :param backup_name: Name of the service being backed up (e.g., 'jenkins')
         :param directories: List of directories to include in the archive
         :return: Path to the created backup file
         """
         try:
+            # Create backup directory structure
+            backup_dir = f"/var/backups/{backup_name}"
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            # Set proper permissions for the backup directory
+            subprocess.run(["sudo", "chmod", "755", backup_dir], check=True)
+            
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            backup_file = f"/var/backups/{backup_name}_backup_{timestamp}.tar.gz"
-            os.makedirs(os.path.dirname(backup_file), exist_ok=True)
+            backup_file = f"{backup_dir}/{backup_name}_backup_{timestamp}.tar.gz"
 
             # Ensure at least one valid directory exists
             existing_dirs = [d for d in directories if os.path.exists(d)]
             if not existing_dirs:
                 raise FileNotFoundError(f"No valid directories found for {backup_name} backup.")
+                
+            self.logger.info(f"Creating backup for directories: {existing_dirs}")
 
-            # Create the tar.gz archive
-            subprocess.run(["sudo", "tar", "-czf", backup_file] + existing_dirs, check=True)
+            # Create the tar.gz archive with correct permissions
+            cmd = ["sudo", "tar", "-czf", backup_file] + existing_dirs
+            self.logger.info(f"Running command: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+            
+            # Make sure the created file is readable by our process
+            subprocess.run(["sudo", "chmod", "644", backup_file], check=True)
+            
             self.logger.info(f"{backup_name.capitalize()} backup created: {backup_file}")
 
-            # 🔥 Inline cleanup of old backups (keep only the latest one)
-            backups = [
-                os.path.join("/var/backups", f)
-                for f in os.listdir("/var/backups")
-                if f.startswith(f"{backup_name}_backup_") and f.endswith(".tar.gz")
-            ]
+            # Cleanup of old backups (keep only the latest one)
+            if os.path.exists(backup_dir):
+                backups = [
+                    os.path.join(backup_dir, f)
+                    for f in os.listdir(backup_dir)
+                    if f.startswith(f"{backup_name}_backup_") and f.endswith(".tar.gz")
+                ]
 
-            # Sort backups by creation time (newest first)
-            backups.sort(key=os.path.getctime, reverse=True)
-
-            # Remove older backups (keep only the latest one)
-            for old_backup in backups[1:]:  # Skip index 0 (most recent)
-                try:
-                    os.remove(old_backup)
-                    self.logger.info(f"Removed old backup: {old_backup}")
-                except PermissionError:
-                    self.logger.warning(f"Permission denied when removing: {old_backup}")
-
+                # Sort backups by creation time (newest first)
+                backups.sort(key=os.path.getctime, reverse=True)
+                
+                if len(backups) > 1:
+                    # Remove older backups (keep only the latest one)
+                    for old_backup in backups[1:]:  # Skip index 0 (most recent)
+                        try:
+                            subprocess.run(["sudo", "rm", old_backup], check=True)
+                            self.logger.info(f"Removed old backup: {old_backup}")
+                        except subprocess.CalledProcessError as e:
+                            self.logger.warning(f"Permission denied when removing: {old_backup} - {e}")
+            
+            self.logger.info(f"Uploading backup file: {backup_file}")
             self.upload_to_google_drive(file_path=backup_file, google_drive_folder_id='1roM3QbZJs2Ck2eQr3t7Zh5zSWd3Wfs5d')
+            
+            return backup_file
+            
         except subprocess.CalledProcessError as e:
             self.logger.error(f"{backup_name.capitalize()} backup failed: {e}")
             raise
@@ -98,6 +127,7 @@ class BackupManager:
         :return: Google Drive file ID
         """
         try:
+            self.logger.info(f"Starting Google Drive upload for {file_path}")
             google_credentials_json_path = "cred.json"
 
             with open(google_credentials_json_path, "r") as f:
@@ -118,7 +148,11 @@ class BackupManager:
             file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
 
             self.logger.info(f"File uploaded successfully. File ID: {file.get('id')}")
+            
+            # Now explicitly call delete function with the same drive_service
             self.delete_old_drive_backups(drive_service=drive_service, google_drive_folder_id=google_drive_folder_id)
+            
+            return file.get('id')
 
         except Exception as e:
             self.logger.error(f"Google Drive upload failed: {e}")
@@ -129,6 +163,7 @@ class BackupManager:
         Deletes all old backups from Google Drive, keeping only the latest one.
         """
         try:
+            self.logger.info(f"Cleaning up old backups in Google Drive folder: {google_drive_folder_id}")
             query = f"'{google_drive_folder_id}' in parents and trashed=false"
             results = drive_service.files().list(q=query, fields="files(id, name, createdTime)").execute()
             files = results.get("files", [])
@@ -138,50 +173,20 @@ class BackupManager:
                 return
 
             files.sort(key=lambda x: x["createdTime"], reverse=True)
+            self.logger.info(f"Found {len(files)} backups in Google Drive")
             self.logger.info(f"Keeping latest backup: {files[0]['name']} (ID: {files[0]['id']})")
 
-            for file in files[1:]:
-                try:
-                    drive_service.files().delete(fileId=file["id"]).execute()
-                    self.logger.info(f"Deleted old backup: {file['name']} (ID: {file['id']})")
-                except Exception as e:
-                    self.logger.warning(f"Failed to delete {file['name']}: {e}")
+            if len(files) > 1:
+                self.logger.info(f"Deleting {len(files)-1} older backups from Google Drive")
+                for file in files[1:]:
+                    try:
+                        drive_service.files().delete(fileId=file["id"]).execute()
+                        self.logger.info(f"Deleted old backup from Drive: {file['name']} (ID: {file['id']})")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete {file['name']} from Drive: {e}")
 
         except Exception as e:
             self.logger.error(f"Error deleting old backups from Google Drive: {e}")
-
-    def cleanup_old_local_backups(self, backup_dir, backup_name, pattern=None):
-        """
-        Deletes old backup files, keeping only the most recent one.
-
-        :param backup_dir: Directory where backups are stored
-        :param backup_name: Prefix of the backup files to filter them
-        :param pattern: Optional custom pattern for backup files (e.g., '_gitlab_backup.tar')
-        """
-        try:
-            # Default pattern for Jenkins: "{backup_name}_backup_YYYY-MM-DD_HH-MM-SS.tar.gz"
-            if not pattern:
-                pattern = f"{backup_name}_backup_"
-
-            # Find all matching backups
-            backups = [
-                os.path.join(backup_dir, f) for f in os.listdir(backup_dir)
-                if f.startswith(pattern) and (f.endswith(".tar.gz") or f.endswith("_gitlab_backup.tar"))
-            ]
-
-            # Sort backups by creation time (newest first)
-            backups.sort(key=os.path.getctime, reverse=True)
-
-            # Delete all except the latest one
-            for backup in backups[1:]:  # Keep only the first (most recent)
-                try:
-                    os.remove(backup)
-                    self.logger.info(f"Deleted old backup: {backup}")
-                except PermissionError:
-                    self.logger.warning(f"Permission denied when removing: {backup}")
-
-        except Exception as e:
-            self.logger.error(f"Failed to clean up old backups: {e}")
 
     def run_backup(self, backup_name, method, directories=None):
         """
@@ -192,12 +197,18 @@ class BackupManager:
         :param directories: List of directories (only required for 'directory' method)
         """
         try:
+            self.logger.info(f"Starting backup process for {backup_name} using {method} method")
+            
             if method == "gitlab":
                 backup_file = self.create_gitlab_backup()
+                self.logger.info(f"GitLab backup completed successfully: {backup_file}")
+                
             elif method == "directory":
                 if not directories:
                     raise ValueError("No directories provided for directory backup.")
                 backup_file = self.create_directory_backup(backup_name, directories)
+                self.logger.info(f"Directory backup completed successfully: {backup_file}")
+                
             else:
                 raise ValueError("Invalid backup method. Use 'gitlab' or 'directory'.")
 
