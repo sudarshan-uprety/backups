@@ -18,7 +18,7 @@ pipeline {
                                 -o StrictHostKeyChecking=no \
                                 -o UserKnownHostsFile=/dev/null \
                                 "$SERVER_USER@$SERVER_HOST" \
-                                "cd backups && sudo -n python3 gitlab_backups.py"
+                                "cd backups && sudo python3 backups.py"
                         """
                     }
                 }
