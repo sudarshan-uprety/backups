@@ -121,10 +121,7 @@ class BackupManager:
 
     def upload_to_google_drive(self, file_path, google_drive_folder_id):
         """
-        Uploads a backup file to Google Drive.
-
-        :param file_path: Path to the backup file
-        :return: Google Drive file ID
+        Uploads a backup file to Google Drive and cleans up old backups.
         """
         try:
             self.logger.info(f"Starting Google Drive upload for {file_path}")
@@ -139,54 +136,81 @@ class BackupManager:
             )
             drive_service = build("drive", "v3", credentials=credentials)
 
+            # 1. Upload the new file
             file_metadata = {
                 "name": os.path.basename(file_path),
-                "parents": [google_drive_folder_id]
+                'parents': [google_drive_folder_id] if google_drive_folder_id else []
             }
 
-            media = MediaFileUpload(file_path, resumable=True)
-            file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+            media = MediaFileUpload(
+                file_path,
+                resumable=True
+            )
 
-            self.logger.info(f"File uploaded successfully. File ID: {file.get('id')}")
+            uploaded_file = drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id,name,createdTime"
+            ).execute()
+
+            file_id = uploaded_file.get('id')
+            file_name = uploaded_file.get('name')
+            self.logger.info(f"File uploaded successfully. File ID: {file_id}, Name: {file_name}")
             
-            # Now explicitly call delete function with the same drive_service
-            self.delete_old_drive_backups(drive_service=drive_service, google_drive_folder_id=google_drive_folder_id)
+            # 2. Add a delay to ensure the file is indexed (3-5 seconds usually sufficient)
+            import time
+            time.sleep(5)
             
-            return file.get('id')
+            # 3. Now handle cleanup separately
+            self.clean_drive_folder(drive_service, google_drive_folder_id)
+            
+            return file_id
 
         except Exception as e:
             self.logger.error(f"Google Drive upload failed: {e}")
             raise
 
-    def delete_old_drive_backups(self, drive_service, google_drive_folder_id):
+
+    def clean_drive_folder(self, drive_service, folder_id):
         """
-        Deletes all old backups from Google Drive, keeping only the latest one.
+        Separate function to clean up a Google Drive folder, keeping only the most recent file.
         """
         try:
-            self.logger.info(f"Cleaning up old backups in Google Drive folder: {google_drive_folder_id}")
-            query = f"'{google_drive_folder_id}' in parents and trashed=false"
-            results = drive_service.files().list(q=query, fields="files(id, name, createdTime)").execute()
+            self.logger.info(f"Cleaning up old backups in Google Drive folder: {folder_id}")
+            
+            # Get all files in the folder
+            query = f"'{folder_id}' in parents and trashed=false"
+            results = drive_service.files().list(
+                q=query, 
+                fields="files(id, name, createdTime)",
+                orderBy="createdTime desc"  # Request sorted by creation time (newest first)
+            ).execute()
+            
             files = results.get("files", [])
-
+            
             if not files:
                 self.logger.info("No backup files found in Google Drive.")
                 return
-
-            files.sort(key=lambda x: x["createdTime"], reverse=True)
+                
             self.logger.info(f"Found {len(files)} backups in Google Drive")
-            self.logger.info(f"Keeping latest backup: {files[0]['name']} (ID: {files[0]['id']})")
-
+            
+            # Re-sort to ensure newest first (belt and suspenders approach)
+            files.sort(key=lambda x: x['createdTime'], reverse=True)
+            
+            self.logger.info(f"Keeping latest backup: {files[0]['name']} (ID: {files[0]['id']}, Created: {files[0]['createdTime']})")
+            
+            # Delete all but the first (newest) file
             if len(files) > 1:
                 self.logger.info(f"Deleting {len(files)-1} older backups from Google Drive")
                 for file in files[1:]:
                     try:
                         drive_service.files().delete(fileId=file["id"]).execute()
-                        self.logger.info(f"Deleted old backup from Drive: {file['name']} (ID: {file['id']})")
+                        self.logger.info(f"Deleted old backup from Drive: {file['name']} (ID: {file['id']}, Created: {file['createdTime']})")
                     except Exception as e:
                         self.logger.warning(f"Failed to delete {file['name']} from Drive: {e}")
-
+        
         except Exception as e:
-            self.logger.error(f"Error deleting old backups from Google Drive: {e}")
+            self.logger.error(f"Error cleaning up Google Drive folder: {e}")
 
     def run_backup(self, backup_name, method, directories=None):
         """
