@@ -31,16 +31,26 @@ pipeline {
                                 ./backup_scripts/ \
                                 \${SERVER_USER}@\${SERVER_HOST}:/home/\${SERVER_USER}/backups/
                             """
+                            
+                            // Execute the backup script with full path after copying
+                            sh """
+                                ssh -i "$SSH_KEY_PATH" -p "$SSH_PORT" \
+                                    -o StrictHostKeyChecking=no \
+                                    -o UserKnownHostsFile=/dev/null \
+                                    "$SERVER_USER@$SERVER_HOST" \
+                                    "cd /home/$SERVER_USER/backups && sudo -n python3 main.py"
+                            """
+                        } else {
+                            // If directory exists, use the original command format
+                            echo "Backup directory and scripts found. Executing backup..."
+                            sh """
+                                ssh -i "$SSH_KEY_PATH" -p "$SSH_PORT" \
+                                    -o StrictHostKeyChecking=no \
+                                    -o UserKnownHostsFile=/dev/null \
+                                    "$SERVER_USER@$SERVER_HOST" \
+                                    "cd backups && sudo python3 main.py"
+                            """
                         }
-                        
-                        // Now execute the backup script
-                        sh """
-                            ssh -i "$SSH_KEY_PATH" -p "$SSH_PORT" \
-                                -o StrictHostKeyChecking=no \
-                                -o UserKnownHostsFile=/dev/null \
-                                "$SERVER_USER@$SERVER_HOST" \
-                                "cd /home/$SERVER_USER/backups && sudo -n python3 main.py"
-                        """
                     }
                 }
             }
