@@ -63,58 +63,52 @@ class BackupManager:
         :return: Path to the created backup file
         """
         try:
-            # Create backup directory structure
             backup_dir = f"/var/backups/{backup_name}"
             os.makedirs(backup_dir, exist_ok=True)
-            
-            # Set proper permissions for the backup directory
             subprocess.run(["sudo", "chmod", "755", backup_dir], check=True)
-            
+
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            snapshot_dir = f"/tmp/{backup_name}_snapshot_{timestamp}"
+            os.makedirs(snapshot_dir, exist_ok=True)
+
+            # Rsync each directory to snapshot location
+            for d in directories:
+                if os.path.exists(d):
+                    basename = os.path.basename(d.rstrip('/'))
+                    dest_path = os.path.join(snapshot_dir, basename)
+                    rsync_cmd = ["sudo", "rsync", "-a", "--delete", d + "/", dest_path]
+                    self.logger.info(f"Running rsync: {' '.join(rsync_cmd)}")
+                    subprocess.run(rsync_cmd, check=True)
+                else:
+                    self.logger.warning(f"Directory not found, skipping: {d}")
+
             backup_file = f"{backup_dir}/{backup_name}_backup_{timestamp}.tar.gz"
-
-            # Ensure at least one valid directory exists
-            existing_dirs = [d for d in directories if os.path.exists(d)]
-            if not existing_dirs:
-                raise FileNotFoundError(f"No valid directories found for {backup_name} backup.")
-                
-            self.logger.info(f"Creating backup for directories: {existing_dirs}")
-
-            # Create the tar.gz archive with correct permissions
-            cmd = ["sudo", "tar", "-czf", backup_file] + existing_dirs
-            self.logger.info(f"Running command: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True)
-            
-            # Make sure the created file is readable by our process
+            tar_cmd = ["sudo", "tar", "-czf", backup_file, "-C", snapshot_dir, "."]
+            self.logger.info(f"Creating archive: {' '.join(tar_cmd)}")
+            subprocess.run(tar_cmd, check=True)
             subprocess.run(["sudo", "chmod", "644", backup_file], check=True)
-            
+
+            # Clean up the snapshot folder
+            subprocess.run(["sudo", "rm", "-rf", snapshot_dir], check=True)
+
             self.logger.info(f"{backup_name.capitalize()} backup created: {backup_file}")
 
-            # Cleanup of old backups (keep only the latest one)
-            if os.path.exists(backup_dir):
-                backups = [
-                    os.path.join(backup_dir, f)
-                    for f in os.listdir(backup_dir)
-                    if f.startswith(f"{backup_name}_backup_") and f.endswith(".tar.gz")
-                ]
+            # Remove old backups
+            backups = [
+                os.path.join(backup_dir, f)
+                for f in os.listdir(backup_dir)
+                if f.startswith(f"{backup_name}_backup_") and f.endswith(".tar.gz")
+            ]
+            backups.sort(key=os.path.getctime, reverse=True)
+            for old_backup in backups[1:]:
+                subprocess.run(["sudo", "rm", old_backup], check=True)
+                self.logger.info(f"Removed old backup: {old_backup}")
 
-                # Sort backups by creation time (newest first)
-                backups.sort(key=os.path.getctime, reverse=True)
-                
-                if len(backups) > 1:
-                    # Remove older backups (keep only the latest one)
-                    for old_backup in backups[1:]:  # Skip index 0 (most recent)
-                        try:
-                            subprocess.run(["sudo", "rm", old_backup], check=True)
-                            self.logger.info(f"Removed old backup: {old_backup}")
-                        except subprocess.CalledProcessError as e:
-                            self.logger.warning(f"Permission denied when removing: {old_backup} - {e}")
-            
             self.logger.info(f"Uploading backup file: {backup_file}")
             self.upload_to_google_drive(file_path=backup_file, google_drive_folder_id='1roM3QbZJs2Ck2eQr3t7Zh5zSWd3Wfs5d')
-            
+
             return backup_file
-            
+
         except subprocess.CalledProcessError as e:
             self.logger.error(f"{backup_name.capitalize()} backup failed: {e}")
             raise
